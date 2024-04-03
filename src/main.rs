@@ -1,10 +1,12 @@
 use std::{
     io::{BufRead, BufReader, Write},
     net::{TcpListener, TcpStream},
+    str::FromStr,
 };
 
-use anyhow::Context;
-use http::{Method, Response, Status};
+use http::request::{Request, RequestError};
+use http::response::Response;
+use http::Status;
 
 mod http;
 
@@ -32,48 +34,23 @@ fn handle_connection(mut stream: TcpStream) -> anyhow::Result<()> {
     let mut request_line = String::new();
     reader.read_line(&mut request_line)?;
 
-    let parts: Vec<_> = request_line.split(' ').collect();
-    if parts.len() != 3 {
-        let response = Response::new(Status::BadRequest);
-        write_response(&mut stream, response)?
-    }
-
-    let method = parts[0];
-    let path = parts[1];
-    let _http_ver = parts[2];
-
-    if check_method(method).is_err() {
-        let response = Response::new(Status::MethodNotAllowed);
-        write_response(&mut stream, response)?;
-        return Ok(());
+    let request = match Request::from_str(&request_line) {
+        Ok(req) => req,
+        Err(err) => match err {
+            RequestError::BadRequestError => {
+                write_response(&mut stream, Response::new(Status::BadRequest))?;
+                return Ok(());
+            }
+            RequestError::MethodNotAllowedError => {
+                write_response(&mut stream, Response::new(Status::MethodNotAllowed))?;
+                return Ok(());
+            }
+        },
     };
 
-    let mut response = hande_path(path);
+    let mut response = request.handle();
 
     Ok(stream.write_all(response.as_bytes())?)
-}
-
-pub fn check_method(method: &str) -> anyhow::Result<()> {
-    Method::from(method)
-        .context("check HTTP method")
-        .map_err(|err| {
-            eprintln!("Err: {:?}", err);
-            err
-        })?;
-    Ok(())
-}
-
-pub fn hande_path(path: &str) -> Response {
-    if path == "/" {
-        return Response::new(Status::OK);
-    }
-
-    if let Some(echo) = path.strip_prefix("/echo/") {
-        return Response::text(echo);
-    }
-
-    eprintln!("Err: path {path} {:?}", Status::NotFound);
-    Response::new(Status::NotFound)
 }
 
 pub fn write_response(stream: &mut TcpStream, mut response: Response) -> anyhow::Result<()> {
