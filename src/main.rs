@@ -48,7 +48,7 @@ fn handle_connection(mut stream: TcpStream) -> anyhow::Result<()> {
         return Ok(());
     };
 
-    let response = hande_path(path);
+    let mut response = hande_path(path);
 
     Ok(stream.write_all(response.as_bytes())?)
 }
@@ -67,10 +67,15 @@ pub fn hande_path(path: &str) -> Response {
     if path == "/" {
         return Response::new(Status::OK);
     }
+
+    if let Some(echo) = path.strip_prefix("/echo/") {
+        return Response::text(echo);
+    }
+
     eprintln!("Err: path {path} {:?}", Status::NotFound);
     Response::new(Status::NotFound)
 }
 
-pub fn write_response(stream: &mut TcpStream, response: Response) -> anyhow::Result<()> {
+pub fn write_response(stream: &mut TcpStream, mut response: Response) -> anyhow::Result<()> {
     Ok(stream.write_all(response.as_bytes())?)
 }
