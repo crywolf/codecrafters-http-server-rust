@@ -27,6 +27,9 @@ pub enum Status {
 }
 
 pub mod request {
+    use std::collections::HashMap;
+    use std::io::BufRead;
+
     use super::response::Response;
     use super::*;
 
@@ -47,18 +50,20 @@ pub mod request {
     #[allow(dead_code)]
     pub struct Request {
         http_version: String,
+        headers: HashMap<String, String>,
         method: Method,
         path: String,
     }
 
-    impl std::str::FromStr for Request {
-        type Err = RequestError;
+    impl Request {
+        pub fn new(reader: &mut impl BufRead) -> anyhow::Result<Self> {
+            let mut request_line = String::new();
+            reader.read_line(&mut request_line)?;
 
-        fn from_str(request_str: &str) -> Result<Self, Self::Err> {
-            let parts: Vec<_> = request_str.split(' ').collect();
+            let parts: Vec<_> = request_line.split(' ').collect();
             if parts.len() != 3 {
                 eprintln!("Err: {:?} {:?}", RequestError::BadRequestError, parts);
-                return Err(RequestError::BadRequestError);
+                anyhow::bail!(RequestError::BadRequestError);
             }
 
             let method = parts[0];
@@ -69,21 +74,32 @@ pub mod request {
                 Ok(method) => method,
                 Err(err) => {
                     eprintln!("Err: {:?}", err);
-                    return Err(RequestError::MethodNotAllowedError);
+                    anyhow::bail!(RequestError::MethodNotAllowedError);
                 }
             };
 
+            let mut headers = HashMap::new();
+
+            for line in reader
+                .lines()
+                .map(|line| line.unwrap_or_default())
+                .take_while(|line| !line.is_empty())
+            {
+                if let Some((k, v)) = line.split_once(": ") {
+                    headers.insert(k.to_owned(), v.to_string());
+                }
+            }
+
             let r = Self {
                 http_version,
+                headers,
                 method,
                 path,
             };
 
             Ok(r)
         }
-    }
 
-    impl Request {
         pub fn handle(&self) -> Response {
             if self.path == "/" {
                 return Response::new(Status::OK);
@@ -91,6 +107,14 @@ pub mod request {
 
             if let Some(echo) = self.path.strip_prefix("/echo/") {
                 return Response::text(echo);
+            }
+
+            if self.path.strip_prefix("/user-agent").is_some() {
+                let agent = match self.headers.get("User-Agent") {
+                    Some(agent) => agent,
+                    None => "User-Agent header is missing",
+                };
+                return Response::text(agent);
             }
 
             eprintln!("Err: path {} {:?}", self.path, Status::NotFound);

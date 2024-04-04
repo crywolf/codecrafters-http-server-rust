@@ -1,7 +1,6 @@
 use std::{
-    io::{BufRead, BufReader, Write},
+    io::{BufReader, Write},
     net::{TcpListener, TcpStream},
-    str::FromStr,
 };
 
 use http::request::{Request, RequestError};
@@ -31,20 +30,18 @@ fn main() -> anyhow::Result<()> {
 fn handle_connection(mut stream: TcpStream) -> anyhow::Result<()> {
     let mut reader = BufReader::new(&mut stream);
 
-    let mut request_line = String::new();
-    reader.read_line(&mut request_line)?;
-
-    let request = match Request::from_str(&request_line) {
+    let request = match Request::new(&mut reader) {
         Ok(req) => req,
-        Err(err) => match err {
-            RequestError::BadRequestError => {
+        Err(err) => match err.downcast_ref() {
+            Some(RequestError::BadRequestError) => {
                 write_response(&mut stream, Response::new(Status::BadRequest))?;
                 return Ok(());
             }
-            RequestError::MethodNotAllowedError => {
+            Some(RequestError::MethodNotAllowedError) => {
                 write_response(&mut stream, Response::new(Status::MethodNotAllowed))?;
                 return Ok(());
             }
+            None => anyhow::bail!(err),
         },
     };
 
