@@ -28,7 +28,8 @@ pub enum Status {
 
 pub mod request {
     use std::collections::HashMap;
-    use std::io::BufRead;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::net::TcpStream;
 
     use super::response::Response;
     use super::*;
@@ -56,9 +57,9 @@ pub mod request {
     }
 
     impl Request {
-        pub fn new(reader: &mut impl BufRead) -> anyhow::Result<Self> {
+        pub async fn new(reader: &mut BufReader<TcpStream>) -> anyhow::Result<Self> {
             let mut request_line = String::new();
-            reader.read_line(&mut request_line)?;
+            reader.read_line(&mut request_line).await?;
 
             let parts: Vec<_> = request_line.split(' ').collect();
             if parts.len() != 3 {
@@ -80,11 +81,11 @@ pub mod request {
 
             let mut headers = HashMap::new();
 
-            for line in reader
-                .lines()
-                .map(|line| line.unwrap_or_default())
-                .take_while(|line| !line.is_empty())
-            {
+            let mut lines = reader.lines();
+            while let Some(line) = lines.next_line().await? {
+                if line.is_empty() {
+                    break;
+                }
                 if let Some((k, v)) = line.split_once(": ") {
                     headers.insert(k.to_owned(), v.to_string());
                 }
