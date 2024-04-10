@@ -4,14 +4,14 @@ use bytes::BytesMut;
 #[derive(PartialEq)]
 pub enum Method {
     GET,
-    // POST,
+    POST,
 }
 
 impl Method {
     pub fn from(str: &str) -> anyhow::Result<Method> {
         let method = match str.to_ascii_uppercase().as_str() {
             "GET" => Method::GET,
-            //"POST" => Method::POST,
+            "POST" => Method::POST,
             _ => anyhow::bail!("unsupported method {}", str),
         };
         Ok(method)
@@ -21,9 +21,11 @@ impl Method {
 #[derive(Debug)]
 pub enum Status {
     OK,
+    Created,
     BadRequest,
     NotFound,
     MethodNotAllowed,
+    InternalServerError,
 }
 
 pub mod request {
@@ -31,7 +33,7 @@ pub mod request {
     use std::path::PathBuf;
     use std::sync::Arc;
     use tokio::fs;
-    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
     use tokio::net::TcpStream;
 
     use super::response::Response;
@@ -58,6 +60,7 @@ pub mod request {
         headers: HashMap<String, String>,
         method: Method,
         path: String,
+        content: Option<Vec<u8>>,
     }
 
     impl Request {
@@ -90,12 +93,20 @@ pub mod request {
 
             let mut lines = reader.lines();
             while let Some(line) = lines.next_line().await? {
-                if line.is_empty() {
-                    break;
-                }
                 if let Some((k, v)) = line.split_once(": ") {
                     headers.insert(k.to_owned(), v.to_string());
                 }
+                if line.is_empty() {
+                    break;
+                }
+            }
+
+            let mut content = None;
+            if let Some(content_length) = headers.get("Content-Length") {
+                let mut buf = vec![0u8; content_length.parse()?];
+                reader.read_exact(&mut buf).await?;
+
+                content = Some(buf);
             }
 
             let r = Self {
@@ -104,44 +115,81 @@ pub mod request {
                 headers,
                 method,
                 path,
+                content,
             };
 
             Ok(r)
         }
 
         pub async fn handle(&self) -> Response {
+            // GET /
             if self.path == "/" {
+                if self.method != Method::GET {
+                    return Response::new(Status::MethodNotAllowed);
+                }
+
                 return Response::new(Status::OK);
             }
 
-            // /echo/*
+            // GET /echo/*
             if let Some(echo) = self.path.strip_prefix("/echo/") {
+                if self.method != Method::GET {
+                    return Response::new(Status::MethodNotAllowed);
+                }
+
                 return Response::text(echo);
             }
 
-            // /user-agent/
+            // GET /user-agent/
             if self.path.strip_prefix("/user-agent").is_some() {
+                if self.method != Method::GET {
+                    return Response::new(Status::MethodNotAllowed);
+                }
+
                 let agent = match self.headers.get("User-Agent") {
                     Some(agent) => agent,
                     None => "User-Agent header is missing",
                 };
+
                 return Response::text(agent);
             }
 
-            // GET /files/
+            // /files/
             if let Some(filename) = self.path.strip_prefix("/files/") {
                 let mut filepath: PathBuf;
 
-                if let Some(filedir) = &self.config.files_dir {
-                    filepath = PathBuf::from(filedir);
-                    filepath.push(filename);
-                } else {
-                    return Response::new(Status::NotFound);
-                }
+                let response = match self.method {
+                    // GET /files/ => return file
+                    Method::GET => {
+                        if let Some(filedir) = &self.config.files_dir {
+                            filepath = PathBuf::from(filedir);
+                            filepath.push(filename);
+                        } else {
+                            return Response::new(Status::NotFound);
+                        }
 
-                let response = match fs::read(filepath).await {
-                    Ok(content) => Response::binary(content),
-                    Err(_) => Response::new(Status::NotFound),
+                        let response = match fs::read(filepath).await {
+                            Ok(content) => Response::binary(content),
+                            Err(_) => Response::new(Status::NotFound),
+                        };
+                        response
+                    }
+                    // POST /files/ => store file
+                    Method::POST => {
+                        if let Some(filedir) = &self.config.files_dir {
+                            filepath = PathBuf::from(filedir);
+                            filepath.push(filename);
+
+                            if let Some(content) = &self.content {
+                                if fs::write(filepath, content).await.is_err() {
+                                    return Response::new(Status::InternalServerError);
+                                }
+                            }
+                            Response::new(Status::Created)
+                        } else {
+                            Response::new(Status::InternalServerError)
+                        }
+                    }
                 };
 
                 return response;
@@ -199,9 +247,11 @@ pub mod response {
         pub fn as_bytes(&mut self) -> &[u8] {
             let status_line = match &self.status {
                 Status::OK => Self::STATUS_200_OK,
+                Status::Created => Self::STATUS_201_CREATED,
                 Status::BadRequest => Self::STATUS_400_BAD_REQUEST,
                 Status::NotFound => Self::STATUS_404_NOT_FOUND,
                 Status::MethodNotAllowed => Self::STATUS_405_METHOD_NOT_ALLOWED,
+                Status::InternalServerError => Self::STATUS_500_INTERNAL_SERVER_ERROR,
             };
 
             self.bytes.extend_from_slice(b"HTTP/1.1 ");
@@ -223,8 +273,10 @@ pub mod response {
         }
 
         const STATUS_200_OK: &'static str = "200 OK";
+        const STATUS_201_CREATED: &'static str = "201 Created";
         const STATUS_400_BAD_REQUEST: &'static str = "400 Bad Request";
         const STATUS_404_NOT_FOUND: &'static str = "404 Not Found";
         const STATUS_405_METHOD_NOT_ALLOWED: &'static str = "405 Method Not Allowed";
+        const STATUS_500_INTERNAL_SERVER_ERROR: &'static str = "500 Internal Server Error";
     }
 }
