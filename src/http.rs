@@ -28,6 +28,9 @@ pub enum Status {
 
 pub mod request {
     use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tokio::fs;
     use tokio::io::{AsyncBufReadExt, BufReader};
     use tokio::net::TcpStream;
 
@@ -50,6 +53,7 @@ pub mod request {
 
     #[allow(dead_code)]
     pub struct Request {
+        config: Arc<Config>,
         http_version: String,
         headers: HashMap<String, String>,
         method: Method,
@@ -57,7 +61,10 @@ pub mod request {
     }
 
     impl Request {
-        pub async fn new(reader: &mut BufReader<TcpStream>) -> anyhow::Result<Self> {
+        pub async fn new(
+            reader: &mut BufReader<TcpStream>,
+            config: Arc<Config>,
+        ) -> anyhow::Result<Self> {
             let mut request_line = String::new();
             reader.read_line(&mut request_line).await?;
 
@@ -92,6 +99,7 @@ pub mod request {
             }
 
             let r = Self {
+                config,
                 http_version,
                 headers,
                 method,
@@ -101,15 +109,17 @@ pub mod request {
             Ok(r)
         }
 
-        pub fn handle(&self) -> Response {
+        pub async fn handle(&self) -> Response {
             if self.path == "/" {
                 return Response::new(Status::OK);
             }
 
+            // /echo/*
             if let Some(echo) = self.path.strip_prefix("/echo/") {
                 return Response::text(echo);
             }
 
+            // /user-agent/
             if self.path.strip_prefix("/user-agent").is_some() {
                 let agent = match self.headers.get("User-Agent") {
                     Some(agent) => agent,
@@ -118,9 +128,33 @@ pub mod request {
                 return Response::text(agent);
             }
 
+            // GET /files/
+            if let Some(filename) = self.path.strip_prefix("/files/") {
+                let mut filepath: PathBuf;
+
+                if let Some(filedir) = &self.config.files_dir {
+                    filepath = PathBuf::from(filedir);
+                    filepath.push(filename);
+                } else {
+                    return Response::new(Status::NotFound);
+                }
+
+                let response = match fs::read(filepath).await {
+                    Ok(content) => Response::binary(content),
+                    Err(_) => Response::new(Status::NotFound),
+                };
+
+                return response;
+            }
+
             eprintln!("Err: path {} {:?}", self.path, Status::NotFound);
             Response::new(Status::NotFound)
         }
+    }
+
+    #[derive(Default)]
+    pub struct Config {
+        pub files_dir: Option<String>,
     }
 }
 
@@ -129,7 +163,7 @@ pub mod response {
 
     pub struct Response<'a> {
         status: Status,
-        content: Option<&'a str>,
+        content: Option<Vec<u8>>,
         content_type: &'a str,
         content_length: usize,
         bytes: BytesMut,
@@ -149,6 +183,14 @@ pub mod response {
         pub fn text(content: &'a str) -> Self {
             let mut r = Self::new(Status::OK);
             r.content_type = "text/plain";
+            r.content_length = content.len();
+            r.content = Some(content.to_owned().into_bytes());
+            r
+        }
+
+        pub fn binary(content: Vec<u8>) -> Self {
+            let mut r = Self::new(Status::OK);
+            r.content_type = "application/octet-stream";
             r.content_length = content.len();
             r.content = Some(content);
             r
@@ -172,7 +214,7 @@ pub mod response {
                 self.bytes
                     .extend_from_slice(self.content_length.to_string().as_bytes());
                 self.bytes.extend_from_slice(b"\r\n\r\n");
-                self.bytes.extend_from_slice(content.as_bytes());
+                self.bytes.extend_from_slice(content);
             } else {
                 self.bytes.extend_from_slice(b"\r\n\r\n");
             }
