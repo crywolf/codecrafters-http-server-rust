@@ -94,7 +94,7 @@ pub mod request {
             let mut lines = reader.lines();
             while let Some(line) = lines.next_line().await? {
                 if let Some((k, v)) = line.split_once(": ") {
-                    headers.insert(k.to_owned(), v.to_string());
+                    headers.insert(k.to_lowercase(), v.to_string());
                 }
                 if line.is_empty() {
                     break;
@@ -102,7 +102,7 @@ pub mod request {
             }
 
             let mut content = None;
-            if let Some(content_length) = headers.get("Content-Length") {
+            if let Some(content_length) = headers.get("content-length") {
                 let mut buf = vec![0u8; content_length.parse()?];
                 reader.read_exact(&mut buf).await?;
 
@@ -122,6 +122,8 @@ pub mod request {
         }
 
         pub async fn handle(&self) -> Response {
+            let encoding = self.headers.get("accept-encoding");
+
             // GET /
             if self.path == "/" {
                 if self.method != Method::GET {
@@ -137,7 +139,7 @@ pub mod request {
                     return Response::new(Status::MethodNotAllowed);
                 }
 
-                return Response::text(echo);
+                return Response::text(echo, encoding);
             }
 
             // GET /user-agent/
@@ -146,12 +148,12 @@ pub mod request {
                     return Response::new(Status::MethodNotAllowed);
                 }
 
-                let agent = match self.headers.get("User-Agent") {
+                let agent = match self.headers.get("user-agent") {
                     Some(agent) => agent,
                     None => "User-Agent header is missing",
                 };
 
-                return Response::text(agent);
+                return Response::text(agent, encoding);
             }
 
             // /files/
@@ -169,7 +171,7 @@ pub mod request {
                         }
 
                         let response = match fs::read(filepath).await {
-                            Ok(content) => Response::binary(content),
+                            Ok(content) => Response::binary(content, encoding),
                             Err(_) => Response::new(Status::NotFound),
                         };
                         response
@@ -214,7 +216,29 @@ pub mod response {
         content: Option<Vec<u8>>,
         content_type: &'a str,
         content_length: usize,
+        //        encoding: Option<&'a String>,
+        encoding: Encoding,
         bytes: BytesMut,
+    }
+
+    #[derive(PartialEq)]
+    enum Encoding {
+        None,
+        Gzip,
+    }
+
+    impl Encoding {
+        pub fn from(o: Option<&String>) -> Self {
+            if let Some(encoding) = o {
+                if encoding == "gzip" {
+                    Self::Gzip
+                } else {
+                    Self::None
+                }
+            } else {
+                Self::None
+            }
+        }
     }
 
     impl<'a> Response<'a> {
@@ -224,23 +248,26 @@ pub mod response {
                 content: None,
                 content_type: "",
                 content_length: 0,
+                encoding: Encoding::None,
                 bytes: BytesMut::with_capacity(64),
             }
         }
 
-        pub fn text(content: &'a str) -> Self {
+        pub fn text(content: &'a str, encoding: Option<&'a String>) -> Self {
             let mut r = Self::new(Status::OK);
             r.content_type = "text/plain";
             r.content_length = content.len();
             r.content = Some(content.to_owned().into_bytes());
+            r.encoding = Encoding::from(encoding);
             r
         }
 
-        pub fn binary(content: Vec<u8>) -> Self {
+        pub fn binary(content: Vec<u8>, encoding: Option<&'a String>) -> Self {
             let mut r = Self::new(Status::OK);
             r.content_type = "application/octet-stream";
             r.content_length = content.len();
             r.content = Some(content);
+            r.encoding = Encoding::from(encoding);
             r
         }
 
@@ -258,14 +285,21 @@ pub mod response {
             self.bytes.extend_from_slice(status_line.as_bytes());
 
             if let Some(content) = &self.content {
+                // Headers
+                if self.encoding == Encoding::Gzip {
+                    self.bytes.extend_from_slice(b"\r\nContent-Encoding: ");
+                    self.bytes.extend_from_slice(b"gzip");
+                }
                 self.bytes.extend_from_slice(b"\r\nContent-Type: ");
                 self.bytes.extend_from_slice(self.content_type.as_bytes());
                 self.bytes.extend_from_slice(b"\r\nContent-Length: ");
                 self.bytes
                     .extend_from_slice(self.content_length.to_string().as_bytes());
                 self.bytes.extend_from_slice(b"\r\n\r\n");
+                // Content
                 self.bytes.extend_from_slice(content);
             } else {
+                // No content
                 self.bytes.extend_from_slice(b"\r\n\r\n");
             }
 
