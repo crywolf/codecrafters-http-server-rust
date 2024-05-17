@@ -273,6 +273,22 @@ pub mod response {
         }
 
         pub fn as_bytes(&mut self) -> &[u8] {
+            self.bytes.extend_from_slice(b"HTTP/1.1 ");
+
+            if let Some(ref mut content) = self.content {
+                if self.encoding == Encoding::Gzip {
+                    // GZIP compression
+                    *content = match compression::gzip::compress(content) {
+                        Ok(val) => val,
+                        Err(err) => {
+                            self.status = Status::InternalServerError;
+                            Vec::from(format!("GZIP compression failed: {}", err))
+                        }
+                    };
+                    self.content_length = content.len();
+                }
+            }
+
             let status_line = match &self.status {
                 Status::OK => Self::STATUS_200_OK,
                 Status::Created => Self::STATUS_201_CREATED,
@@ -282,25 +298,21 @@ pub mod response {
                 Status::InternalServerError => Self::STATUS_500_INTERNAL_SERVER_ERROR,
             };
 
-            self.bytes.extend_from_slice(b"HTTP/1.1 ");
             self.bytes.extend_from_slice(status_line.as_bytes());
 
-            if let Some(ref mut content) = self.content {
-                let mut content_length = self.content_length;
+            if let Some(content) = &self.content {
                 // Headers
                 if self.encoding == Encoding::Gzip {
-                    // GZIP compression
                     self.bytes.extend_from_slice(b"\r\nContent-Encoding: ");
                     self.bytes.extend_from_slice(b"gzip");
-                    *content = compression::gzip::compress(content).expect("fail to encode data");
-                    content_length = content.len();
                 }
                 self.bytes.extend_from_slice(b"\r\nContent-Type: ");
                 self.bytes.extend_from_slice(self.content_type.as_bytes());
                 self.bytes.extend_from_slice(b"\r\nContent-Length: ");
                 self.bytes
-                    .extend_from_slice(content_length.to_string().as_bytes());
+                    .extend_from_slice(self.content_length.to_string().as_bytes());
                 self.bytes.extend_from_slice(b"\r\n\r\n");
+
                 // Content
                 self.bytes.extend_from_slice(content);
             } else {
