@@ -216,7 +216,6 @@ pub mod response {
         content: Option<Vec<u8>>,
         content_type: &'a str,
         content_length: usize,
-        //        encoding: Option<&'a String>,
         encoding: Encoding,
         bytes: BytesMut,
     }
@@ -230,7 +229,7 @@ pub mod response {
     impl Encoding {
         pub fn from(o: Option<&String>) -> Self {
             if let Some(encoding) = o {
-                if encoding == "gzip" {
+                if encoding.contains("gzip") {
                     Self::Gzip
                 } else {
                     Self::None
