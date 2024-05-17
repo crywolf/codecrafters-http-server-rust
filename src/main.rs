@@ -7,6 +7,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::io::BufReader;
 use tokio::net::{TcpListener, TcpStream};
 
+mod compression;
 mod http;
 
 #[tokio::main]
